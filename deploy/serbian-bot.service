@@ -1,0 +1,31 @@
+[Unit]
+Description=Serbian voice translation Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=serbian-bot
+Group=serbian-bot
+WorkingDirectory=/opt/serbian-bot
+EnvironmentFile=/opt/serbian-bot/.env
+ExecStart=/opt/serbian-bot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+# Не даём одному упавшему запуску крутиться в цикле бесконечно
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Базовая изоляция
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/serbian-bot
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=serbian-bot
+
+[Install]
+WantedBy=multi-user.target

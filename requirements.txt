@@ -1,0 +1,4 @@
+aiogram==3.31.0
+openai==3.10.0
+anthropic==1.4.0
+python-dotenv==1.0.1
