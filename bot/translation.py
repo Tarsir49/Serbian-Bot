@@ -1,21 +1,27 @@
-"""Перевод русского текста на сербский через LLM (OpenAI или Anthropic)."""
+"""Перевод между русским и сербским через LLM (OpenAI или Anthropic)."""
 
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Protocol
 
 from .config import Config
 from .errors import TranslationError
-from .prompts import UNINTELLIGIBLE_MARKER, translation_system_prompt
+from .prompts import LANG_TAG, UNINTELLIGIBLE_MARKER, translation_system_prompt
 
 logger = logging.getLogger(__name__)
 
+# Направление по умолчанию, если модель забыла метку: исходный сценарий — русский на сербский.
+DEFAULT_TARGET_LANG = "sr"
+
 _LABEL_RE = re.compile(
-    r"^\s*(prevod|prevod na srpski|перевод|перевод на сербский|translation)\s*[:\-–]\s*",
+    r"^\s*(prevod na srpski|prevod na ruski|prevod|перевод на сербский|перевод на русский"
+    r"|перевод|translation)\s*[:\-–]\s*",
     re.IGNORECASE,
 )
+_LANG_RE = re.compile(rf"^\s*{LANG_TAG}\s*[:\-]\s*(ru|sr)\b[^\S\n]*\n?", re.IGNORECASE)
 _QUOTE_PAIRS = (("«", "»"), ('"', '"'), ("“", "”"), ("'", "'"), ("`", "`"))
 
 
@@ -33,10 +39,31 @@ def clean_translation(raw: str) -> str:
     return text
 
 
+@dataclass(frozen=True)
+class Translation:
+    """Перевод и язык, на который он сделан."""
+
+    text: str
+    target_lang: str = DEFAULT_TARGET_LANG
+
+
+def parse_translation(raw: str) -> Translation:
+    """Отделяет метку направления от текста и чистит текст."""
+    text = raw.strip()
+    match = _LANG_RE.match(text)
+    if not match:
+        # Метки нет — считаем, что перевели на сербский: так вёл себя бот до двух направлений.
+        return Translation(text=clean_translation(text))
+    return Translation(
+        text=clean_translation(text[match.end() :]),
+        target_lang=match.group(1).lower(),
+    )
+
+
 class Translator(Protocol):
     """Общий интерфейс переводчика."""
 
-    async def translate(self, text: str) -> str: ...
+    async def translate(self, text: str) -> Translation: ...
 
     async def aclose(self) -> None: ...
 
@@ -55,7 +82,7 @@ class OpenAITranslator:
             max_retries=2,
         )
 
-    async def translate(self, text: str) -> str:
+    async def translate(self, text: str) -> Translation:
         import openai
 
         try:
@@ -71,7 +98,7 @@ class OpenAITranslator:
             raise TranslationError("Сервис перевода недоступен, попробуй ещё раз") from exc
 
         content = response.choices[0].message.content or ""
-        return clean_translation(content)
+        return parse_translation(content)
 
     async def aclose(self) -> None:
         await self._client.close()
@@ -92,7 +119,7 @@ class AnthropicTranslator:
             max_retries=2,
         )
 
-    async def translate(self, text: str) -> str:
+    async def translate(self, text: str) -> Translation:
         import anthropic
 
         try:
@@ -112,7 +139,7 @@ class AnthropicTranslator:
             raise TranslationError("Модель отказалась переводить это сообщение")
 
         parts = [block.text for block in response.content if block.type == "text"]
-        return clean_translation("".join(parts))
+        return parse_translation("".join(parts))
 
     async def aclose(self) -> None:
         await self._client.close()

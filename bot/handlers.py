@@ -1,4 +1,4 @@
-"""Хендлеры Telegram: приём голоса и текста, ответ голосом на сербском."""
+"""Хендлеры Telegram: приём голоса и текста, ответ голосом на втором языке."""
 
 from __future__ import annotations
 
@@ -24,21 +24,27 @@ logger = logging.getLogger(__name__)
 router = Router(name="translator")
 
 GREETING = (
-    "Привет! Я перевожу русскую речь на сербский.\n\n"
-    "🎤 Пришли голосовое сообщение на русском — я отвечу голосовым на сербском.\n"
-    "⌨️ Можно и текстом: пришли фразу, получишь перевод и озвучку.\n\n"
-    "Перевод разговорный и короткий — как говорят в Сербии."
+    "Привет! Я перевожу в обе стороны: русский ↔ сербский.\n\n"
+    "🎤 Голосовое на русском — отвечу голосовым на сербском.\n"
+    "🎤 Голосовое на сербском — отвечу голосовым на русском.\n"
+    "⌨️ Текстом тоже можно: пришли фразу, получишь перевод и озвучку.\n\n"
+    "Язык определяю сам, переключать ничего не надо. "
+    "Перевод разговорный и короткий — как говорят в жизни."
 )
 
 HELP = (
     "Как пользоваться:\n"
-    "1. Запиши голосовое на русском (до {duration} сек).\n"
+    "1. Запиши голосовое на русском или сербском (до {duration} сек).\n"
     "2. Подожди несколько секунд.\n"
-    "3. Получи голосовое на сербском и его текст.\n\n"
+    "3. Получи голосовое на втором языке и его текст.\n\n"
+    "Направление выбирается само: русский → сербский, сербский → русский.\n\n"
     "Команды:\n"
     "/start — начало\n"
     "/help — эта справка"
 )
+
+# Флаг языка в подписи к переводу.
+FLAGS = {"ru": "🇷🇺", "sr": "🇷🇸"}
 
 VOICE_FORBIDDEN_HINT = (
     "🔇 Голосовое отправить не смог: в твоих настройках Telegram они запрещены.\n"
@@ -95,7 +101,7 @@ async def handle_voice(
     config: Config,
     pipeline: TranslationPipeline,
 ) -> None:
-    """Голосовое/аудио на русском -> голосовое на сербском."""
+    """Голосовое/аудио на русском или сербском -> голосовое на втором языке."""
     media = message.voice or message.audio or message.video_note
     duration = getattr(media, "duration", 0) or 0
     if duration > config.max_voice_duration:
@@ -144,7 +150,7 @@ async def handle_text(
     config: Config,
     pipeline: TranslationPipeline,
 ) -> None:
-    """Текст на русском -> голосовое на сербском."""
+    """Текст на русском или сербском -> голосовое на втором языке."""
     text = (message.text or "").strip()
     if not text:
         return
@@ -178,7 +184,7 @@ async def handle_text(
 
 @router.message()
 async def handle_other(message: Message) -> None:
-    await message.reply("Пришли голосовое сообщение на русском 🎤 или текст.")
+    await message.reply("Пришли голосовое 🎤 или текст — на русском или сербском.")
 
 
 def _source_filename(message: Message) -> str:
@@ -190,12 +196,29 @@ def _source_filename(message: Message) -> str:
     return "voice.ogg"
 
 
+def flags_for(target_lang: str) -> tuple[str, str]:
+    """Флаги перевода и оригинала: направление задаёт язык перевода."""
+    if target_lang == "ru":
+        return FLAGS["ru"], FLAGS["sr"]
+    return FLAGS["sr"], FLAGS["ru"]
+
+
 def build_caption(result: TranslationResult, max_source: int = 300) -> str:
     """Подпись к голосовому: перевод и распознанный оригинал."""
     source = result.source_text.strip()
     if len(source) > max_source:
         source = source[: max_source - 1].rstrip() + "…"
-    return f"🇷🇸 {escape(result.translated_text)}\n\n<i>🇷🇺 {escape(source)}</i>"
+    target_flag, source_flag = flags_for(result.target_lang)
+    return (
+        f"{target_flag} {escape(result.translated_text)}\n\n"
+        f"<i>{source_flag} {escape(source)}</i>"
+    )
+
+
+def build_translation_line(result: TranslationResult) -> str:
+    """Только перевод с флагом языка, без распознанного оригинала."""
+    target_flag, _ = flags_for(result.target_lang)
+    return f"{target_flag} {escape(result.translated_text)}"
 
 
 def is_voice_forbidden(exc: TelegramBadRequest) -> bool:
@@ -208,8 +231,9 @@ def build_text_fallback(result: TranslationResult) -> str:
     caption = build_caption(result)
     if len(caption) > TEXT_FALLBACK_LIMIT:
         # Перевод важнее распознанного оригинала: при переполнении оставляем только его.
+        target_flag, _ = flags_for(result.target_lang)
         text = result.translated_text.strip()[: TEXT_FALLBACK_LIMIT - 1].rstrip()
-        caption = f"🇷🇸 {escape(text)}…"
+        caption = f"{target_flag} {escape(text)}…"
     return f"{caption}\n\n{VOICE_FORBIDDEN_HINT}"
 
 
@@ -228,7 +252,7 @@ async def _reply_with_translation(
             await message.reply_voice(voice, caption=caption)
         else:
             await message.reply_voice(voice)
-            await message.answer(f"🇷🇸 {escape(result.translated_text)}")
+            await message.answer(build_translation_line(result))
     except TelegramBadRequest as exc:
         if not is_voice_forbidden(exc):
             raise

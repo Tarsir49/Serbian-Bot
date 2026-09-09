@@ -5,6 +5,7 @@ from bot.config import Config
 from bot.handlers import (
     VOICE_FORBIDDEN_HINT,
     _reply_with_translation,
+    build_caption,
     build_text_fallback,
     is_voice_forbidden,
 )
@@ -45,10 +46,31 @@ def make_config(send_translation_text: bool = True) -> Config:
     )
 
 
-def make_result(translated: str = "Ćao, kako si?") -> TranslationResult:
+def make_result(
+    translated: str = "Ćao, kako si?",
+    target_lang: str = "sr",
+    source: str = "Привет, как дела?",
+) -> TranslationResult:
     return TranslationResult(
-        source_text="Привет, как дела?", translated_text=translated, audio=b"OggS"
+        source_text=source,
+        translated_text=translated,
+        audio=b"OggS",
+        target_lang=target_lang,
     )
+
+
+def test_caption_flags_russian_to_serbian():
+    caption = build_caption(make_result())
+    assert caption.startswith("🇷🇸 Ćao, kako si?")
+    assert "🇷🇺 Привет, как дела?" in caption
+
+
+def test_caption_flags_serbian_to_russian():
+    result = make_result(translated="Привет, как дела?", target_lang="ru", source="Ćao, kako si?")
+    caption = build_caption(result)
+    # Флаги меняются местами вслед за направлением, иначе подпись врёт про язык.
+    assert caption.startswith("🇷🇺 Привет, как дела?")
+    assert "🇷🇸 Ćao, kako si?" in caption
 
 
 def test_voice_forbidden_is_recognised():
