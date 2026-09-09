@@ -3,9 +3,16 @@
 #   bash deploy/install.sh
 set -euo pipefail
 
-APP_DIR=/opt/serbian-bot
+APP_DIR="${APP_DIR:-/opt/serbian-bot}"
 APP_USER=serbian-bot
 REPO_URL="${REPO_URL:-https://github.com/Tarsir49/Serbian-Bot.git}"
+BRANCH="${BRANCH:-main}"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Нужны права root: sudo bash deploy/install.sh"
+  echo "Нет root? Поставь бота в домашнюю папку: bash deploy/install-user.sh"
+  exit 1
+fi
 
 apt-get update
 apt-get install -y python3 python3-venv python3-pip git
@@ -15,7 +22,7 @@ id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell 
 if [ -d "$APP_DIR/.git" ]; then
   git -C "$APP_DIR" pull --ff-only
 else
-  git clone "$REPO_URL" "$APP_DIR"
+  git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 fi
 
 python3 -m venv "$APP_DIR/.venv"

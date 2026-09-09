@@ -44,26 +44,70 @@ cp .env.example .env      # вписать TELEGRAM_BOT_TOKEN и OPENAI_API_KEY
 python -m bot.main
 ```
 
-## Деплой на VPS (systemd)
+## Деплой на VPS
+
+Каталог `/opt` пишется только под root. Выбери вариант по своим правам на сервере.
+
+### Вариант A — есть root или sudo (рекомендуется)
 
 ```bash
-# на сервере, от root
-git clone https://github.com/Tarsir49/Serbian-Bot.git /opt/serbian-bot
-bash /opt/serbian-bot/deploy/install.sh
-nano /opt/serbian-bot/.env          # вписать ключи
-systemctl restart serbian-bot
-journalctl -u serbian-bot -f        # логи
+sudo git clone https://github.com/Tarsir49/Serbian-Bot.git /opt/serbian-bot
+sudo bash /opt/serbian-bot/deploy/install.sh
+sudo nano /opt/serbian-bot/.env   # вписать ключи
+sudo systemctl restart serbian-bot
+journalctl -u serbian-bot -f      # логи
 ```
 
 `deploy/install.sh` создаёт системного пользователя `serbian-bot`, ставит зависимости в
 `/opt/serbian-bot/.venv`, кладёт unit-файл `deploy/serbian-bot.service` и включает автозапуск.
-Бот работает на long polling — открытых портов, домена и TLS не требуется.
+Бот работает от отдельного непривилегированного пользователя, а не от root.
 
-Обновление:
+### Вариант B — root нет: ставим в домашнюю папку
 
 ```bash
-cd /opt/serbian-bot && git pull && .venv/bin/pip install -r requirements.txt
-systemctl restart serbian-bot
+git clone https://github.com/Tarsir49/Serbian-Bot.git ~/serbian-bot
+bash ~/serbian-bot/deploy/install-user.sh
+nano ~/serbian-bot/.env           # вписать ключи
+systemctl --user restart serbian-bot
+journalctl --user -u serbian-bot -f
+```
+
+Скрипт ставит venv в `~/serbian-bot/.venv` и регистрирует **пользовательский** systemd-юнит
+(`~/.config/systemd/user/serbian-bot.service`) — права root не нужны.
+
+Два нюанса варианта B:
+
+* **`python3-venv` и `git`** должны быть уже установлены. Если нет — их ставит только админ
+  (`apt install python3-venv git`).
+* **Lingering.** Без него пользовательские сервисы останавливаются при выходе из SSH.
+  Скрипт пробует включить его сам (`loginctl enable-linger $USER`); если не вышло — попроси
+  админа выполнить эту команду один раз. Совсем без root автозапуск делается через cron:
+
+  ```
+  crontab -e
+  @reboot cd $HOME/serbian-bot && .venv/bin/python -m bot.main >> $HOME/serbian-bot/bot.log 2>&1
+  ```
+
+Оба варианта работают на long polling — открытых портов, домена и TLS не требуется.
+
+### Установка не из `main`
+
+Пока ветка с кодом не влита в `main`, укажи её явно:
+
+```bash
+BRANCH=claude/serene-fermi-8wbuf9 bash deploy/install.sh        # или install-user.sh
+```
+
+### Обновление
+
+```bash
+# вариант A
+cd /opt/serbian-bot && sudo git pull && sudo .venv/bin/pip install -r requirements.txt
+sudo systemctl restart serbian-bot
+
+# вариант B
+cd ~/serbian-bot && git pull && .venv/bin/pip install -r requirements.txt
+systemctl --user restart serbian-bot
 ```
 
 ## Деплой через Docker
@@ -73,6 +117,9 @@ cp .env.example .env   # заполнить
 docker compose up -d --build
 docker compose logs -f
 ```
+
+Docker тоже требует прав: либо root/sudo, либо членство в группе `docker`
+(её выдаёт админ: `usermod -aG docker $USER`). Если ни того, ни другого нет — вариант B выше.
 
 ## Настройки (`.env`)
 
