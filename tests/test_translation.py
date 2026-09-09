@@ -1,7 +1,7 @@
 import pytest
 
 from bot.prompts import translation_system_prompt, tts_instructions
-from bot.translation import clean_translation, is_unintelligible, parse_translation
+from bot.translation import clean_translation, is_unintelligible, parse_language
 
 
 @pytest.mark.parametrize(
@@ -13,6 +13,7 @@ from bot.translation import clean_translation, is_unintelligible, parse_translat
         ("«Ćao»", "Ćao"),
         ("Prevod: Ćao", "Ćao"),
         ("Перевод: Ćao", "Ćao"),
+        ("Перевод на русский: Привет", "Привет"),
         ("```\nĆao\n```", "Ćao"),
         ("Dobar dan. Kako ste?", "Dobar dan. Kako ste?"),
     ],
@@ -31,49 +32,43 @@ def test_unintelligible_marker():
     assert not is_unintelligible("Šta?")
 
 
-def test_system_prompt_mentions_script():
-    assert "Latin" in translation_system_prompt("latin")
-    assert "Cyrillic" in translation_system_prompt("cyrillic")
-    # Неизвестное значение не должно ронять бота.
-    assert "Latin" in translation_system_prompt("unknown")
-
-
-def test_system_prompt_asks_for_both_directions():
-    prompt = translation_system_prompt("latin")
-    assert "Russian input" in prompt and "Serbian input" in prompt
-    assert "LANG: sr" in prompt and "LANG: ru" in prompt
-
-
 @pytest.mark.parametrize(
-    ("raw", "text", "lang"),
+    ("raw", "expected"),
     [
-        ("LANG: sr\nĆao, kako si?", "Ćao, kako si?", "sr"),
-        ("LANG: ru\nПривет, как дела?", "Привет, как дела?", "ru"),
-        # Регистр и лишние пробелы модель иногда ставит по-своему.
-        ("lang:SR\nĆao", "Ćao", "sr"),
-        ("  LANG : ru \nПривет", "Привет", "ru"),
-        # Чистка обёртки работает и после снятия метки.
-        ('LANG: sr\n"Ćao"', "Ćao", "sr"),
-        ("LANG: ru\nПеревод: Привет", "Привет", "ru"),
-        # Многострочный перевод не должен схлопываться.
-        ("LANG: sr\nDobar dan.\nKako ste?", "Dobar dan.\nKako ste?", "sr"),
+        ("sr", "sr"),
+        ("ru", "ru"),
+        ("  SR\n", "sr"),
+        ("RU.", "ru"),
+        # Промпт просит код, но модель иногда отвечает словом.
+        ("Serbian", "sr"),
+        ("Russian", "ru"),
     ],
 )
-def test_parse_translation(raw, text, lang):
-    result = parse_translation(raw)
-    assert result.text == text
-    assert result.target_lang == lang
+def test_parse_language(raw, expected):
+    assert parse_language(raw) == expected
 
 
-def test_parse_translation_without_tag_defaults_to_serbian():
-    # Модель забыла метку — сохраняем прежнее поведение бота.
-    result = parse_translation("Ćao, kako si?")
-    assert result.text == "Ćao, kako si?"
-    assert result.target_lang == "sr"
+@pytest.mark.parametrize("raw", ["", "не знаю", "ru or sr", "оба"])
+def test_unparsable_answer_falls_back_to_russian(raw):
+    # Падаем в исходный сценарий бота: русский на входе, сербский на выходе.
+    assert parse_language(raw) == "ru"
 
 
-def test_parse_translation_keeps_unintelligible_marker():
-    assert is_unintelligible(parse_translation("???").text)
+def test_translation_prompt_is_one_directional():
+    to_serbian = translation_system_prompt("latin", "sr")
+    assert "translate Russian speech into Serbian" in to_serbian
+    assert "Serbian Latin script" in to_serbian
+
+    to_russian = translation_system_prompt("latin", "ru")
+    assert "translate Serbian speech into Russian" in to_russian
+    # Письменность имеет смысл только для сербского: у русского она одна.
+    assert "Serbian Latin script" not in to_russian
+
+
+def test_translation_prompt_mentions_script():
+    assert "Cyrillic" in translation_system_prompt("cyrillic", "sr")
+    # Неизвестное значение не должно ронять бота.
+    assert "Latin" in translation_system_prompt("unknown", "sr")
 
 
 def test_tts_instructions_differ_by_language():

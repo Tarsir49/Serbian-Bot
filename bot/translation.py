@@ -4,24 +4,27 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
 from typing import Protocol
 
 from .config import Config
 from .errors import TranslationError
-from .prompts import LANG_TAG, UNINTELLIGIBLE_MARKER, translation_system_prompt
+from .language import RUSSIAN, SERBIAN
+from .prompts import (
+    LANGUAGE_DETECTION_PROMPT,
+    UNINTELLIGIBLE_MARKER,
+    translation_system_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
-# Направление по умолчанию, если модель забыла метку: исходный сценарий — русский на сербский.
-DEFAULT_TARGET_LANG = "sr"
+# Куда падаем, если детекция не сработала: исходный сценарий бота — русский на сербский.
+FALLBACK_SOURCE_LANG = RUSSIAN
 
 _LABEL_RE = re.compile(
     r"^\s*(prevod na srpski|prevod na ruski|prevod|перевод на сербский|перевод на русский"
     r"|перевод|translation)\s*[:\-–]\s*",
     re.IGNORECASE,
 )
-_LANG_RE = re.compile(rf"^\s*{LANG_TAG}\s*[:\-]\s*(ru|sr)\b[^\S\n]*\n?", re.IGNORECASE)
 _QUOTE_PAIRS = (("«", "»"), ('"', '"'), ("“", "”"), ("'", "'"), ("`", "`"))
 
 
@@ -39,31 +42,26 @@ def clean_translation(raw: str) -> str:
     return text
 
 
-@dataclass(frozen=True)
-class Translation:
-    """Перевод и язык, на который он сделан."""
-
-    text: str
-    target_lang: str = DEFAULT_TARGET_LANG
-
-
-def parse_translation(raw: str) -> Translation:
-    """Отделяет метку направления от текста и чистит текст."""
-    text = raw.strip()
-    match = _LANG_RE.match(text)
-    if not match:
-        # Метки нет — считаем, что перевели на сербский: так вёл себя бот до двух направлений.
-        return Translation(text=clean_translation(text))
-    return Translation(
-        text=clean_translation(text[match.end() :]),
-        target_lang=match.group(1).lower(),
-    )
+def parse_language(raw: str) -> str:
+    """Ответ детектора -> код языка; всё непонятное считаем русским."""
+    answer = raw.strip().lower()
+    # Промпт просит ровно "ru" или "sr", но модель может ответить и словом.
+    serbian = any(m in answer for m in ("sr", "serb", "срп", "серб"))
+    russian = any(m in answer for m in ("ru", "russ", "рус"))
+    if serbian and not russian:
+        return SERBIAN
+    if russian and not serbian:
+        return RUSSIAN
+    logger.warning("Детектор языка ответил непонятно: %r", raw[:40])
+    return FALLBACK_SOURCE_LANG
 
 
 class Translator(Protocol):
     """Общий интерфейс переводчика."""
 
-    async def translate(self, text: str) -> Translation: ...
+    async def translate(self, text: str, target_lang: str) -> str: ...
+
+    async def detect_language(self, text: str) -> str: ...
 
     async def aclose(self) -> None: ...
 
@@ -75,30 +73,38 @@ class OpenAITranslator:
         from openai import AsyncOpenAI
 
         self._model = config.openai_translation_model
-        self._system_prompt = translation_system_prompt(config.serbian_script)
+        self._prompts = {
+            lang: translation_system_prompt(config.serbian_script, lang)
+            for lang in (RUSSIAN, SERBIAN)
+        }
         self._client = AsyncOpenAI(
             api_key=config.openai_api_key,
             timeout=config.request_timeout,
             max_retries=2,
         )
 
-    async def translate(self, text: str) -> Translation:
+    async def _ask(self, system: str, text: str) -> str:
         import openai
 
         try:
             response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[
-                    {"role": "system", "content": self._system_prompt},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": text},
                 ],
             )
         except openai.APIError as exc:
-            logger.exception("OpenAI: перевод не удался")
+            logger.exception("OpenAI: запрос не удался")
             raise TranslationError("Сервис перевода недоступен, попробуй ещё раз") from exc
 
-        content = response.choices[0].message.content or ""
-        return parse_translation(content)
+        return response.choices[0].message.content or ""
+
+    async def translate(self, text: str, target_lang: str) -> str:
+        return clean_translation(await self._ask(self._prompts[target_lang], text))
+
+    async def detect_language(self, text: str) -> str:
+        return parse_language(await self._ask(LANGUAGE_DETECTION_PROMPT, text))
 
     async def aclose(self) -> None:
         await self._client.close()
@@ -112,14 +118,17 @@ class AnthropicTranslator:
 
         self._model = config.anthropic_model
         self._effort = config.anthropic_effort
-        self._system_prompt = translation_system_prompt(config.serbian_script)
+        self._prompts = {
+            lang: translation_system_prompt(config.serbian_script, lang)
+            for lang in (RUSSIAN, SERBIAN)
+        }
         self._client = AsyncAnthropic(
             api_key=config.anthropic_api_key,
             timeout=float(config.request_timeout),
             max_retries=2,
         )
 
-    async def translate(self, text: str) -> Translation:
+    async def _ask(self, system: str, text: str) -> str:
         import anthropic
 
         try:
@@ -128,18 +137,23 @@ class AnthropicTranslator:
                 max_tokens=4096,
                 # Перевод реплики — простая задача: минимальные «раздумья» ради скорости и цены.
                 output_config={"effort": self._effort},
-                system=self._system_prompt,
+                system=system,
                 messages=[{"role": "user", "content": text}],
             )
         except anthropic.APIError as exc:
-            logger.exception("Anthropic: перевод не удался")
+            logger.exception("Anthropic: запрос не удался")
             raise TranslationError("Сервис перевода недоступен, попробуй ещё раз") from exc
 
         if response.stop_reason == "refusal":
             raise TranslationError("Модель отказалась переводить это сообщение")
 
-        parts = [block.text for block in response.content if block.type == "text"]
-        return parse_translation("".join(parts))
+        return "".join(block.text for block in response.content if block.type == "text")
+
+    async def translate(self, text: str, target_lang: str) -> str:
+        return clean_translation(await self._ask(self._prompts[target_lang], text))
+
+    async def detect_language(self, text: str) -> str:
+        return parse_language(await self._ask(LANGUAGE_DETECTION_PROMPT, text))
 
     async def aclose(self) -> None:
         await self._client.close()

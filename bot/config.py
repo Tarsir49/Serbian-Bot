@@ -23,6 +23,16 @@ def _get_bool(name: str, default: bool) -> bool:
     return raw.lower() in {"1", "true", "yes", "on", "да"}
 
 
+def _get_float(name: str, default: float) -> float:
+    raw = _get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} должен быть числом, получено: {raw!r}") from exc
+
+
 def _get_int(name: str, default: int) -> int:
     raw = _get(name)
     if not raw:
@@ -66,6 +76,11 @@ class Config:
     tts_model: str = "gpt-4o-mini-tts"
     tts_voice: str = "alloy"
     tts_speed: float = 1.0
+
+    # Порог «я не расслышал»: ниже по уверенности или выше по «тут нет речи» —
+    # честно просим перезаписать, а не переводим выдумку.
+    stt_min_logprob: float = -0.7
+    stt_max_no_speech: float = 0.4
 
     # Поведение бота.
     serbian_script: str = "latin"  # latin | cyrillic
@@ -124,6 +139,8 @@ def load_config(env_file: str | None = ".env") -> Config:
         anthropic_effort=_get("ANTHROPIC_EFFORT", "low").lower(),
         openai_translation_model=_get("OPENAI_TRANSLATION_MODEL", "gpt-4.1-mini"),
         stt_model=_get("STT_MODEL", "whisper-1"),
+        stt_min_logprob=_get_float("STT_MIN_LOGPROB", -0.7),
+        stt_max_no_speech=_get_float("STT_MAX_NO_SPEECH", 0.4),
         tts_model=_get("TTS_MODEL", "gpt-4o-mini-tts"),
         tts_voice=_get("TTS_VOICE", "alloy"),
         tts_speed=tts_speed,
