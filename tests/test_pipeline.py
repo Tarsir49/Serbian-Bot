@@ -68,14 +68,15 @@ def make_pipeline(speech, translator) -> TranslationPipeline:
 
 
 async def test_russian_voice_goes_to_serbian():
-    speech, translator = FakeSpeech(), FakeTranslator()
+    speech = FakeSpeech(transcript="Сколько это стоит?")
+    translator = FakeTranslator(translation="Koliko to košta?")
     result = await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
 
-    assert result.source_text == "Привет, как дела?"
-    assert result.translated_text == "Ćao, kako si?"
+    assert result.source_text == "Сколько это стоит?"
+    assert result.translated_text == "Koliko to košta?"
     assert result.target_lang == "sr"
-    assert speech.synthesized == [("Ćao, kako si?", "sr")]
-    assert translator.seen == [("Привет, как дела?", "sr")]
+    assert speech.synthesized == [("Koliko to košta?", "sr")]
+    assert translator.seen == [("Сколько это стоит?", "sr")]
 
 
 async def test_serbian_voice_goes_back_to_russian():
@@ -89,14 +90,16 @@ async def test_serbian_voice_goes_back_to_russian():
     assert translator.seen == [("Ćao, kako si?", "ru")]
 
 
-async def test_language_from_stt_is_trusted_over_the_text():
-    # Расшифровка сербская, но распознавание уверенно сказало "sr" — спрашивать модель незачем.
-    speech = FakeSpeech(transcript="Добар дан", lang="sr")
-    translator = FakeTranslator(translation="Добрый день")
-    await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
+async def test_winning_pass_does_not_decide_the_language():
+    # На чистой записи оба прохода дают один и тот же текст, и победитель по logprob
+    # случаен: здесь выиграл сербский проход, хотя речь очевидно русская («ы» в «ты»).
+    # Решать должен текст, иначе бот «переводит» русский на русский.
+    speech = FakeSpeech(transcript="Привет! Как ты сегодня?", lang="sr")
+    translator = FakeTranslator(translation="Ćao! Kako si danas?")
+    result = await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
 
-    assert translator.detect_calls == []
-    assert translator.seen == [("Добар дан", "ru")]
+    assert result.target_lang == "sr"
+    assert translator.seen == [("Привет! Как ты сегодня?", "sr")]
 
 
 async def test_unclear_audio_is_refused_instead_of_translated():

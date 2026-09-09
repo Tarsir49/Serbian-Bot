@@ -57,8 +57,11 @@ class TranslationPipeline:
             )
             raise EmptySpeechError(UNCLEAR_AUDIO)
 
-        logger.info("Распознано %d символов, язык %s", len(text), transcript.lang)
-        return await self._translate(text, transcript.lang)
+        logger.info("Распознано %d символов, лучший проход %s", len(text), transcript.lang)
+        # Язык берём из самой расшифровки, а не из выигравшего прохода: Whisper не обязан
+        # подчиняться подсказке, и на чистой записи оба прохода дают одинаковый текст —
+        # тогда победитель по logprob случаен, а текст по-прежнему говорит сам за себя.
+        return await self._translate(text, None)
 
     async def from_text(self, source_text: str) -> TranslationResult:
         """Перевод и озвучка готового текста; язык определяем по самому тексту."""
