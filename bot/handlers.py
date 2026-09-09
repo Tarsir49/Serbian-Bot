@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, F, Router
 from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, Message, TelegramObject
 from aiogram.utils.chat_action import ChatActionSender
@@ -38,6 +39,15 @@ HELP = (
     "/start — начало\n"
     "/help — эта справка"
 )
+
+VOICE_FORBIDDEN_HINT = (
+    "🔇 Голосовое отправить не смог: в твоих настройках Telegram они запрещены.\n"
+    "Настройки → Конфиденциальность → Голосовые сообщения → «Все», "
+    "либо добавь бота в исключения."
+)
+
+# Лимит текстового сообщения в Telegram — 4096 символов; берём с запасом на разметку.
+TEXT_FALLBACK_LIMIT = 3000
 
 # Пользователи, чьё сообщение сейчас обрабатывается: один запрос за раз.
 _busy: set[int] = set()
@@ -188,18 +198,40 @@ def build_caption(result: TranslationResult, max_source: int = 300) -> str:
     return f"🇷🇸 {escape(result.translated_text)}\n\n<i>🇷🇺 {escape(source)}</i>"
 
 
+def is_voice_forbidden(exc: TelegramBadRequest) -> bool:
+    """Получатель запретил присылать себе голосовые (настройка приватности Telegram)."""
+    return "VOICE_MESSAGES_FORBIDDEN" in str(exc)
+
+
+def build_text_fallback(result: TranslationResult) -> str:
+    """Ответ текстом, когда голосовое отправить нельзя."""
+    caption = build_caption(result)
+    if len(caption) > TEXT_FALLBACK_LIMIT:
+        # Перевод важнее распознанного оригинала: при переполнении оставляем только его.
+        text = result.translated_text.strip()[: TEXT_FALLBACK_LIMIT - 1].rstrip()
+        caption = f"🇷🇸 {escape(text)}…"
+    return f"{caption}\n\n{VOICE_FORBIDDEN_HINT}"
+
+
 async def _reply_with_translation(
     message: Message, result: TranslationResult, config: Config
 ) -> None:
     voice = BufferedInputFile(result.audio, filename="prevod.ogg")
-    if not config.send_translation_text:
-        await message.reply_voice(voice)
-        return
+    try:
+        if not config.send_translation_text:
+            await message.reply_voice(voice)
+            return
 
-    caption = build_caption(result)
-    # Лимит подписи в Telegram — 1024 символа; длинный перевод шлём отдельным сообщением.
-    if len(caption) <= 1000:
-        await message.reply_voice(voice, caption=caption)
-    else:
-        await message.reply_voice(voice)
-        await message.answer(f"🇷🇸 {escape(result.translated_text)}")
+        caption = build_caption(result)
+        # Лимит подписи в Telegram — 1024 символа; длинный перевод шлём отдельным сообщением.
+        if len(caption) <= 1000:
+            await message.reply_voice(voice, caption=caption)
+        else:
+            await message.reply_voice(voice)
+            await message.answer(f"🇷🇸 {escape(result.translated_text)}")
+    except TelegramBadRequest as exc:
+        if not is_voice_forbidden(exc):
+            raise
+        # Перевод уже готов и оплачен — отдаём его текстом, а не теряем.
+        logger.info("Голосовые запрещены у получателя, отвечаю текстом")
+        await message.reply(build_text_fallback(result))
