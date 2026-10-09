@@ -39,6 +39,32 @@ most letters with Russian, so judge by vocabulary and grammar, not by the alphab
 Answer with exactly one word: ru or sr. Nothing else.\
 """
 
+# Расшифровки двух проходов одного аудио. Проход на «неправильном» языке выдаёт
+# набор похоже звучащих, но чужих слов — это и есть улика, по которой видно,
+# на каком языке говорили. Сравнивать алфавиты бессмысленно: каждый проход пишет
+# на том языке, который ему навязали.
+SPOKEN_LANGUAGE_PROMPT = """\
+You decide which language a person actually spoke.
+
+You get two automatic transcriptions of the SAME audio: one decoded as Russian,
+one decoded as Serbian. The transcription in the language that was NOT spoken
+reads as broken: wrong words that merely sound similar, odd grammar, nonsense.
+The transcription in the language that WAS spoken reads as a fluent, natural phrase.
+
+Judge by vocabulary and grammar, never by the alphabet: each transcription is
+written in the alphabet of its own decoder, so the script proves nothing.
+Answer with exactly one word: ru or sr. Nothing else.\
+"""
+
+
+def spoken_language_question(russian_pass: str, serbian_pass: str) -> str:
+    """Пара расшифровок одним сообщением для детектора языка речи."""
+    return (
+        f"[decoded as Russian]\n{russian_pass}\n\n"
+        f"[decoded as Serbian]\n{serbian_pass}"
+    )
+
+
 TTS_INSTRUCTIONS = {
     "sr": """\
 Read the text aloud in Serbian with a natural Belgrade accent.

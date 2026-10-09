@@ -43,6 +43,38 @@ class Transcript:
         return self.avg_logprob >= min_logprob and self.no_speech_prob <= max_no_speech
 
 
+def _confidence(transcript: "Transcript") -> float:
+    return transcript.avg_logprob if transcript.avg_logprob is not None else -99.0
+
+
+@dataclass(frozen=True)
+class Hearing:
+    """Все расшифровки одного аудио — по одной на язык-кандидат.
+
+    Варианты не сворачиваются в «лучший» заранее: пока язык речи неизвестен,
+    выбирать между ними нечем. Проход, которому велели слышать русский, на
+    сербской речи звучит убедительно (русский декодер уверен в себе), поэтому
+    решение по logprob систематически заваливается в русский — язык определяет
+    пайплайн по обоим вариантам, см. `bot.language`.
+    """
+
+    variants: tuple[Transcript, ...]
+
+    @property
+    def best(self) -> Transcript:
+        """Самый уверенный вариант — для проверки «расслышали ли вообще»."""
+        return max(self.variants, key=_confidence)
+
+    @property
+    def by_lang(self) -> dict[str, str]:
+        """{язык прохода: текст} — только для проходов с известным языком."""
+        return {t.lang: t.text for t in self.variants if t.lang and t.text}
+
+    def text_for(self, lang: str) -> str:
+        """Расшифровка, сделанная в расчёте на этот язык."""
+        return self.by_lang.get(lang) or self.best.text
+
+
 class SpeechService:
     """Обёртка над OpenAI: аудио -> текст и текст -> аудио."""
 
@@ -56,35 +88,29 @@ class SpeechService:
             max_retries=2,
         )
 
-    async def transcribe(self, audio: bytes, filename: str) -> Transcript:
-        """Распознаёт речь, выбирая наиболее правдоподобную расшифровку.
+    async def transcribe(self, audio: bytes, filename: str) -> Hearing:
+        """Распознаёт речь на каждом языке-кандидате и отдаёт все варианты.
 
         Автоопределению языка у Whisper доверять нельзя: на плохой записи оно
         уходит в русский и переписывает сербскую речь русскими словами. Поэтому
-        расшифровываем дважды с явным языком и берём вариант, который лёг на
-        аудио увереннее.
-
-        Поле `lang` — это язык выигравшего прохода, а не вывод о языке речи:
-        на чистой записи оба прохода дают одинаковый текст и побеждает случайный.
-        Язык определяется по самой расшифровке, см. `bot.language`.
+        расшифровываем дважды с явным языком — а выбор между вариантами делает
+        пайплайн, когда определит язык речи.
         """
         if self._config.stt_model in VERBOSE_MODELS:
-            return await self._transcribe_best_of(audio, filename)
-        return await self._transcribe_once(audio, filename)
+            return await self._transcribe_variants(audio, filename)
+        return Hearing(variants=(await self._transcribe_once(audio, filename),))
 
-    async def _transcribe_best_of(self, audio: bytes, filename: str) -> Transcript:
+    async def _transcribe_variants(self, audio: bytes, filename: str) -> Hearing:
         variants = await asyncio.gather(
             *(self._transcribe_as(audio, filename, lang) for lang in CANDIDATE_LANGS)
         )
-        best = max(variants, key=lambda t: t.avg_logprob if t.avg_logprob is not None else -99.0)
         logger.info(
-            "Расшифровка: %s -> выбран %s",
+            "Расшифровка: %s",
             ", ".join(
                 f"{t.lang}={t.avg_logprob:+.3f}" for t in variants if t.avg_logprob is not None
             ),
-            best.lang,
         )
-        return best
+        return Hearing(variants=tuple(variants))
 
     async def _transcribe_as(self, audio: bytes, filename: str, lang: str) -> Transcript:
         import openai

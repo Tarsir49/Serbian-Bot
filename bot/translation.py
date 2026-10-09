@@ -11,7 +11,9 @@ from .errors import TranslationError
 from .language import RUSSIAN, SERBIAN
 from .prompts import (
     LANGUAGE_DETECTION_PROMPT,
+    SPOKEN_LANGUAGE_PROMPT,
     UNINTELLIGIBLE_MARKER,
+    spoken_language_question,
     translation_system_prompt,
 )
 
@@ -63,6 +65,8 @@ class Translator(Protocol):
 
     async def detect_language(self, text: str) -> str: ...
 
+    async def pick_spoken_language(self, by_lang: dict[str, str]) -> str: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -105,6 +109,11 @@ class OpenAITranslator:
 
     async def detect_language(self, text: str) -> str:
         return parse_language(await self._ask(LANGUAGE_DETECTION_PROMPT, text))
+
+    async def pick_spoken_language(self, by_lang: dict[str, str]) -> str:
+        """Какой из двух расшифровок верить: язык речи по паре вариантов."""
+        question = spoken_language_question(by_lang[RUSSIAN], by_lang[SERBIAN])
+        return parse_language(await self._ask(SPOKEN_LANGUAGE_PROMPT, question))
 
     async def aclose(self) -> None:
         await self._client.close()
@@ -154,6 +163,11 @@ class AnthropicTranslator:
 
     async def detect_language(self, text: str) -> str:
         return parse_language(await self._ask(LANGUAGE_DETECTION_PROMPT, text))
+
+    async def pick_spoken_language(self, by_lang: dict[str, str]) -> str:
+        """Какой из двух расшифровок верить: язык речи по паре вариантов."""
+        question = spoken_language_question(by_lang[RUSSIAN], by_lang[SERBIAN])
+        return parse_language(await self._ask(SPOKEN_LANGUAGE_PROMPT, question))
 
     async def aclose(self) -> None:
         await self._client.close()

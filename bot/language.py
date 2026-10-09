@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from difflib import SequenceMatcher
+
 SERBIAN = "sr"
 RUSSIAN = "ru"
 
@@ -47,3 +49,50 @@ def detect_by_script(text: str) -> str | None:
         return RUSSIAN
     # Общие буквы с обеих сторон или поровну примет — решить нельзя.
     return None
+
+
+def detect_against_grain(by_lang: dict[str, str]) -> str | None:
+    """Язык по приметам, возникшим ВОПРЕКИ навязанному проходу распознавания.
+
+    Два прохода одного аудио нельзя сравнивать по алфавиту напрямую: каждый
+    пишет на том языке, который ему велели, и подтверждает сам себя. Зато
+    примета против течения говорит много: если проход, которому сказали «это
+    русский», всё равно выдал ђјљњћџ или латиницу — речь сербская, и наоборот.
+    """
+    russian_pass = by_lang.get(RUSSIAN, "")
+    serbian_pass = by_lang.get(SERBIAN, "")
+    if not russian_pass or not serbian_pass:
+        return None
+
+    russian_pass_says = detect_by_script(russian_pass)
+    serbian_pass_says = detect_by_script(serbian_pass)
+    # Проверяем и вторую сторону: когда оба прохода тянут против своего языка,
+    # это шум, а не улика.
+    if russian_pass_says == SERBIAN and serbian_pass_says != RUSSIAN:
+        return SERBIAN
+    if serbian_pass_says == RUSSIAN and russian_pass_says != SERBIAN:
+        return RUSSIAN
+    return None
+
+
+_ECHO_RATIO = 0.95
+_ECHO_MIN_LENGTH = 8
+
+
+def _normalize(text: str) -> str:
+    return "".join(ch for ch in text.lower() if ch.isalnum() or ch.isspace()).strip()
+
+
+def looks_like_echo(source: str, translated: str) -> bool:
+    """Вернул ли переводчик тот же текст вместо перевода.
+
+    Защита от главного способа соврать молча: прислать исходную фразу как
+    перевод. Короткие реплики не проверяем — там совпадение бывает законным
+    («Taksi», «Mama»).
+    """
+    left, right = _normalize(source), _normalize(translated)
+    if not left or not right:
+        return False
+    if len(left) < _ECHO_MIN_LENGTH or len(right) < _ECHO_MIN_LENGTH:
+        return left == right
+    return SequenceMatcher(None, left, right).ratio() >= _ECHO_RATIO

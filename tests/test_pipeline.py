@@ -4,7 +4,7 @@ from bot.config import Config
 from bot.errors import EmptySpeechError
 from bot.handlers import build_caption
 from bot.pipeline import TranslationPipeline, TranslationResult
-from bot.speech import Transcript
+from bot.speech import Hearing, Transcript
 
 
 class FakeSpeech:
@@ -14,23 +14,42 @@ class FakeSpeech:
         lang="ru",
         avg_logprob=-0.25,
         no_speech_prob=0.05,
+        variants=None,
     ):
         self.transcript = transcript
         self.lang = lang
         self.avg_logprob = avg_logprob
         self.no_speech_prob = no_speech_prob
+        # {язык прохода: (текст, avg_logprob)} — полноценная пара расшифровок.
+        self.variants = variants
         # Пары (текст, язык): язык важен, от него зависит акцент диктора.
         self.synthesized: list[tuple[str, str]] = []
         self.closed = False
 
-    async def transcribe(self, audio: bytes, filename: str) -> Transcript:
+    async def transcribe(self, audio: bytes, filename: str) -> Hearing:
         self.audio = audio
         self.filename = filename
-        return Transcript(
-            text=self.transcript,
-            lang=self.lang,
-            avg_logprob=self.avg_logprob,
-            no_speech_prob=self.no_speech_prob,
+        if self.variants is not None:
+            return Hearing(
+                variants=tuple(
+                    Transcript(
+                        text=text,
+                        lang=lang,
+                        avg_logprob=logprob,
+                        no_speech_prob=self.no_speech_prob,
+                    )
+                    for lang, (text, logprob) in self.variants.items()
+                )
+            )
+        return Hearing(
+            variants=(
+                Transcript(
+                    text=self.transcript,
+                    lang=self.lang,
+                    avg_logprob=self.avg_logprob,
+                    no_speech_prob=self.no_speech_prob,
+                ),
+            )
         )
 
     async def synthesize(self, text: str, lang: str = "sr") -> bytes:
@@ -42,12 +61,15 @@ class FakeSpeech:
 
 
 class FakeTranslator:
-    def __init__(self, translation="Ćao, kako si?", detected="ru"):
+    def __init__(self, translation="Ćao, kako si?", detected="ru", spoken=None):
         self.translation = translation
         self.detected = detected
+        # Что ответит детектор, когда его спросят по паре расшифровок.
+        self.spoken = spoken
         # Пары (текст, язык перевода).
         self.seen: list[tuple[str, str]] = []
         self.detect_calls: list[str] = []
+        self.pick_calls: list[dict[str, str]] = []
         self.closed = False
 
     async def translate(self, text: str, target_lang: str) -> str:
@@ -57,6 +79,10 @@ class FakeTranslator:
     async def detect_language(self, text: str) -> str:
         self.detect_calls.append(text)
         return self.detected
+
+    async def pick_spoken_language(self, by_lang: dict[str, str]) -> str:
+        self.pick_calls.append(dict(by_lang))
+        return self.spoken or self.detected
 
     async def aclose(self) -> None:
         self.closed = True
@@ -177,3 +203,100 @@ def test_caption_escapes_and_truncates():
     assert caption.startswith("🇷🇸 Ćao")
     assert "…" in caption
     assert "<b>" not in caption
+
+
+# --- направление перевода по двум расшифровкам одного аудио ---------------------
+
+# Та самая поломка: сербскую речь русский проход расслышал русскими словами и
+# выиграл по уверенности, язык «подтвердился» буквой «я» — и бот перевёл сербский
+# на сербский. Побеждать должен язык речи, а не самый самоуверенный проход.
+SERBIAN_SPEECH = {
+    "ru": ("Я сам добро, хвала на питаню", -0.18),
+    "sr": ("Ја сам добро, хвала на питању", -0.31),
+}
+
+
+async def test_serbian_speech_is_not_translated_into_serbian():
+    speech = FakeSpeech(variants=SERBIAN_SPEECH)
+    translator = FakeTranslator(translation="Я в порядке, спасибо", spoken="sr")
+    result = await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
+
+    assert result.target_lang == "ru"
+    # Источником стала сербская расшифровка, а не победивший русский проход.
+    assert result.source_text == "Ја сам добро, хвала на питању"
+    assert translator.seen == [("Ја сам добро, хвала на питању", "ru")]
+    assert speech.synthesized == [("Я в порядке, спасибо", "ru")]
+
+
+async def test_both_transcriptions_go_to_the_detector():
+    speech = FakeSpeech(variants=SERBIAN_SPEECH)
+    translator = FakeTranslator(translation="Я в порядке, спасибо", spoken="sr")
+    await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
+
+    # Модель судит по паре вариантов: порознь каждый выглядит убедительно.
+    assert translator.pick_calls == [
+        {
+            "ru": "Я сам добро, хвала на питаню",
+            "sr": "Ја сам добро, хвала на питању",
+        }
+    ]
+    assert translator.detect_calls == []
+
+
+async def test_serbian_letters_in_the_russian_pass_decide_for_free():
+    # Русскому проходу велели слышать русский, а он выдал ћ — примета против
+    # течения, спрашивать модель не о чем.
+    speech = FakeSpeech(
+        variants={
+            "ru": ("Хвала пуно на помоћи", -0.20),
+            "sr": ("Hvala puno na pomoći", -0.25),
+        }
+    )
+    translator = FakeTranslator(translation="Большое спасибо за помощь")
+    result = await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
+
+    assert result.target_lang == "ru"
+    assert translator.pick_calls == []
+    assert translator.detect_calls == []
+
+
+async def test_russian_letters_in_the_serbian_pass_decide_for_free():
+    speech = FakeSpeech(
+        variants={
+            "ru": ("Привет! Как ты сегодня?", -0.22),
+            "sr": ("Привет, как ты сегодня", -0.30),
+        }
+    )
+    translator = FakeTranslator(translation="Ćao! Kako si danas?")
+    result = await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
+
+    assert result.target_lang == "sr"
+    assert translator.pick_calls == []
+
+
+async def test_identical_transcriptions_need_no_pair_question():
+    # Оба прохода услышали одно и то же — спорить не о чем, хватает алфавита.
+    speech = FakeSpeech(
+        variants={
+            "ru": ("Сколько это стоит?", -0.21),
+            "sr": ("Сколько это стоит?", -0.24),
+        }
+    )
+    translator = FakeTranslator(translation="Koliko to košta?")
+    result = await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
+
+    assert result.target_lang == "sr"
+    assert translator.pick_calls == []
+    assert translator.detect_calls == []
+
+
+async def test_echo_instead_of_translation_is_refused():
+    # Если перевод дословно равен исходнику — это не перевод, и выдавать его
+    # за перевод нельзя.
+    speech = FakeSpeech(transcript="Dobar dan, kako ste?", lang="sr")
+    translator = FakeTranslator(translation="Dobar dan, kako ste?")
+    with pytest.raises(EmptySpeechError):
+        await make_pipeline(speech, translator).from_voice(b"raw", "voice.ogg")
+
+    # Озвучивать эхо тоже не стали.
+    assert speech.synthesized == []
